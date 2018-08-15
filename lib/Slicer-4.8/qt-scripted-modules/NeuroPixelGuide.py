@@ -3,6 +3,7 @@ import unittest
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 import logging
+import numpy
 
 #
 # NeuroPixelGuide
@@ -39,7 +40,7 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
 
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
-
+    self.stage = None
     # Instantiate and connect widgets ...
 
     #
@@ -56,6 +57,7 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
     self.firstLandMarkSelected = False
     self.secondLandMarkSelected = False
     self.currentVisitingLandMark = 0
+    self.passCount = 0
     
     #
     # input volume selector
@@ -146,9 +148,9 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
     self.set1stLandMarkButton.enabled = True
     parametersFormLayout.addRow(self.set1stLandMarkButton)
 
-    self.set2ndLandMarkButton = qt.QPushButton("Set the Landmark #0")
+    self.set2ndLandMarkButton = qt.QPushButton("Done")
     self.set2ndLandMarkButton.toolTip = "Set n-st Landmark"
-    self.set2ndLandMarkButton.enabled = True
+    self.set2ndLandMarkButton.enabled = False
     parametersFormLayout.addRow(self.set2ndLandMarkButton)
 
     #
@@ -164,12 +166,12 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
     self.targetFiducialSelector.showChildNodeTypes = False
     self.targetFiducialSelector.setMRMLScene( slicer.mrmlScene )
     self.targetFiducialSelector.setToolTip( "Pick the target fiducial list for the algorithm." )
-    parametersFormLayout.addRow("Target fiducials: ", self.targetFiducialSelector)
+    parametersFormLayout.addRow("Target fiducials: 1st Target, 2ed Entrance", self.targetFiducialSelector)
 
     #
     # Second Landmark Button
     #
-    self.applyButton = qt.QPushButton("Apply")
+    self.applyButton = qt.QPushButton("Cacluate the Target")
     self.applyButton.toolTip = "Run the algorithm."
     self.applyButton.enabled = False
     parametersFormLayout.addRow(self.applyButton)
@@ -200,12 +202,14 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
       #self.inputSelector.currentNode() and self.outputSelector.currentNode()
 
   def onConnectStageButton(self):
-    print("Fail to find the stage, running the emulator")
-    self.connectStageButton.setText("Connection.. Failed (emulator)")
-    # TODO: CONNECT TO STAGE
-    # IF CONNECTED THIS BUTTON DISCONNECT FROM THE STAGE
-    qt.QMessageBox.information(slicer.util.mainWindow(),
-                               'NeuroPixel Probe Guide', 'Cannot Find the Stage, Running Emulator')
+    self.stage = stageContol('COM1','SM7')
+    if (self.stage.connect() == False):
+        print("Fail to find the stage, running the emulator")
+        self.connectStageButton.setText("Connection.. Failed (emulator)")
+        # TODO: CONNECT TO STAGE
+        # IF CONNECTED THIS BUTTON DISCONNECT FROM THE STAGE
+        qt.QMessageBox.information(slicer.util.mainWindow(),
+                                   'NeuroPixel Probe Guide', 'Cannot Find the Stage, Running Emulator')
 
 
   def onApplyButton(self):
@@ -213,8 +217,9 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
     enableScreenshotsFlag = self.enableScreenshotsFlagCheckBox.checked
     imageThreshold = self.imageThresholdSliderWidget.value
 
-    entrancePoint = [0, 0, 0]
-    targetPoint =   [0, 0, 0]
+    entrancePoint =  [0, 0, 0]
+    targetPoint =    [0, 0, 0]
+    
     targetFiducials = self.targetFiducialSelector.currentNode()
     targetFiducials.GetNthFiducialPosition( 0, targetPoint )
     targetFiducials.GetNthFiducialPosition( 1, entrancePoint )
@@ -224,37 +229,82 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
     self.applyButton.enabled = False
 
     scene = slicer.mrmlScene
-    line = self.lineModel(scene, entrancePoint, targetPoint, "NeuroPixel", (1,1,0))
+    line = self.lineModel(scene, entrancePoint, targetPoint, "NeuroPixelProbe", (1,1,0))
+    
+    endofProbPoint = [5*entrancePoint[i] - 4*targetPoint[i] for i in numpy.arange(3)]
+    norm = numpy.sqrt(numpy.sum([(endofProbPoint[i] - entrancePoint[i])**2 for i in numpy.arange(3)]))
+    
+    endofProbPoint = [entrancePoint[i] + (endofProbPoint[i] - entrancePoint[i])/norm*10 for i in numpy.arange(3)]
+
+    arrow = self.arrowModel(scene, entrancePoint, endofProbPoint, "NeuroPixelProbe", (1,.3,0))
+  
+    punchingPlaneNormal = numpy.cross(entrancePoint,targetPoint)
+    punchingPlane = self.planeModel(scene, punchingPlaneNormal, entrancePoint, "PunchingPlane", (1,0,0))
     
     # TODO: MOVE TO TAGET POSITION
     #logic.run(self.inputSelector.currentNode(), self.outputSelector.currentNode(), imageThreshold, enableScreenshotsFlag)
 
   def onSet1stLandMarkButton(self):
-      print('First Landmark')
+      print('Reset')
+      if self.stage is None:
+        qt.QMessageBox.information(slicer.util.mainWindow(),
+                                     'NeuroPixel Probe Guide', 'Stage is not connected')
+        return
       inputFiducials = self.inputFiducialSelector.currentNode()
       firstPoint = [0, 0, 0]
       inputFiducials.GetNthFiducialPosition( 0, firstPoint )
       self.firstLandMarkSelected = True
-      self.set2ndLandMarkButton.setText("Set the Landmark #0")
+      self.set2ndLandMarkButton.setText("Set the Landmark #"+str(0)+" ["+inputFiducials.GetNthFiducialLabel(0)+"] pass# 0")
       self.set2ndLandMarkButton.enabled = True
       self.applyButton.enabled = False
       self.currentVisitingLandMark = 0
-      print("Rest the probe registeration..")
+      self.passCount = 0;
+      print("Reset the probe registeration..")
+      self.landmarkMartix = None
+      self.stage.goApproach(1)
 
   def onSet2ndLandMarkButton(self):
-    print('Second Landmark')
+    print('Landmark')
     inputFiducials = self.inputFiducialSelector.currentNode()
     secondPoint = [0, 0, 0]
+    if self.landmarkMartix is None:
+        self.landmarkMartix = numpy.zeros((inputFiducials.GetNumberOfFiducials(),3))
+        #find the det
+        for i in numpy.arange(inputFiducials.GetNumberOfFiducials()):
+            inputFiducials.GetNthFiducialPosition(i,secondPoint)
+            self.landmarkMartix[i][0] = secondPoint[0]
+            self.landmarkMartix[i][1] = secondPoint[1]
+            self.landmarkMartix[i][2] = secondPoint[2]
+        
+        self.landmarkMartix = numpy.dot(self.landmarkMartix.transpose(),self.landmarkMartix)
+        print("DET = ", numpy.abs((numpy.linalg.det(self.landmarkMartix))))
+        #sol = np.linalg.lstsq(A, b)[0]
+
+        if (numpy.abs((numpy.linalg.det(self.landmarkMartix)))<1):
+            qt.QMessageBox.information(slicer.util.mainWindow(),
+                                       'NeuroPixel Probe Guide', 'Landmarks are not independent enough, You need at least 3 independet landmark for registeration')
+            self.landmarkMartix = None
+            return
     
     if (self.currentVisitingLandMark < inputFiducials.GetNumberOfFiducials()):
         inputFiducials.GetNthFiducialPosition( self.currentVisitingLandMark, secondPoint )
         self.secondLandMarkSelected = True
         self.currentVisitingLandMark += 1;
-        print("\nGet the Stage Location...")
-        self.set2ndLandMarkButton.setText("Set the Landmark #"+str(self.currentVisitingLandMark))
+        print("\nGet the Stage Location... X, Y, Z")
+        stagePosition = [0, 0, 0]
+        self.stage.getPosition(stagePosition)
         print(secondPoint)
     
     if (self.currentVisitingLandMark >= inputFiducials.GetNumberOfFiducials()):
+        # TODO: MOVE TO TAGET POSITION
+        print("\nRetracting the Probe...")
+        self.stage.goApproach(0)
+        self.passCount +=1;
+        self.currentVisitingLandMark = 0;
+    self.set2ndLandMarkButton.setText("Set the Landmark #"+str(self.currentVisitingLandMark)+" ["+inputFiducials.GetNthFiducialLabel(self.currentVisitingLandMark)+"] pass# "+str(self.passCount))
+
+
+    if (self.passCount > 1):
         self.set2ndLandMarkButton.setText("Done")
         self.set2ndLandMarkButton.enabled = False
         self.applyButton.enabled = True
@@ -288,6 +338,80 @@ class NeuroPixelGuideWidget(ScriptedLoadableModuleWidget):
         lineModelDisplay.SetInputPolyDataConnection(line.GetOutputPort())
         scene.AddNode(lineModel)
         return line
+
+  def arrowModel(self, scene, point1, point2, name, color):
+    
+        """ Create a line to reflect the puncture path"""
+        #Line mode source
+        
+        arrow = vtk.vtkLineSource()
+        #arrow.SetShaftRadius(0.01)
+        #arrow.SetTipLength(.9)
+        arrow.SetPoint1(point1)#(point1[0][0], point1[0][1], point1[0][2])
+        arrow.SetPoint2(point2)#(point2[0][0], point2[0][1], point2[0][2])
+        
+        tubes = vtk.vtkTubeFilter()
+        tubes.SetInputConnection(arrow.GetOutputPort())
+        tubes.SetRadius(0.8)
+        tubes.SetNumberOfSides(6)
+        
+        # Create model node
+        
+        arrowModel = slicer.vtkMRMLModelNode()
+        arrowModel.SetScene(scene)
+        arrowModel.SetName(name)
+        arrowModel.SetAndObservePolyData(tubes.GetOutput())
+        
+        # Create display node
+        
+        arrowModelDisplay = slicer.vtkMRMLModelDisplayNode()
+        arrowModelDisplay.SetColor(color)
+        arrowModelDisplay.SetScene(scene)
+        scene.AddNode(arrowModelDisplay)
+        arrowModel.SetAndObserveDisplayNodeID(arrowModelDisplay.GetID())
+        arrowModelDisplay.SetInputPolyDataConnection(tubes.GetOutputPort())
+        scene.AddNode(arrowModel)
+        return arrow
+
+
+  def planeModel(self, scene, normal, origin, name, color):
+        """ Create a plane model node which can be viewed in the 3D View """
+        #A plane source
+        
+        plane = vtk.vtkPlane()
+        plane.SetOrigin(origin)
+        plane.SetNormal(normal)
+        
+        planeSample = vtk.vtkSampleFunction()
+        planeSample.SetImplicitFunction(plane)
+        planeSample.SetModelBounds(-10,10,-10,10,-10,10)
+        planeSample.SetSampleDimensions(10,10,10)
+        planeSample.ComputeNormalsOff()
+        
+        planeContour = vtk.vtkContourFilter()
+        #        planeContour.SetInput(planeSample.GetOutput())
+        planeContour.SetInputData(planeSample.GetOutput())
+        
+        # Create plane model node
+        planeNode = slicer.vtkMRMLModelNode()
+        planeNode.SetScene(scene)
+        planeNode.SetName(name)
+        planeNode.SetAndObservePolyData(planeContour.GetOutput())
+        
+        # Create plane display model node
+        planeModelDisplay = slicer.vtkMRMLModelDisplayNode()
+        planeModelDisplay.SetColor(color)
+        planeModelDisplay.SetBackfaceCulling(2)
+        planeModelDisplay.SetScene(scene)
+        scene.AddNode(planeModelDisplay)
+        planeNode.SetAndObserveDisplayNodeID(planeModelDisplay.GetID())
+        
+        #Add to scene
+        
+        #        planeModelDisplay.SetInputPolyData(planeContour.GetOutput())
+        planeModelDisplay.SetInputPolyDataConnection(planeContour.GetOutputPort())
+        scene.AddNode(planeNode)
+        return plane
 
 #
 # NeuroPixelGuideLogic
@@ -722,4 +846,35 @@ class DrawLineModel:
         pointModelDisplay.SetInputPolyDataConnection(sphere.GetOutputPort())
         
         scene.AddNode(pointModel)
+
+class stageContol:
+    def __init__(self, port, deviceType):
+        return
+
+    def connect(self):
+       return False
+
+    def getPosition(self, postion):
+      postion[0] = 0
+      postion[1] = 1
+      postion[2] = 2
+      return
+
+    def goToXYZPosition(self, postion):
+      return
+
+    def goApproach(self, position):
+      return
+
+    def getApproach(self, position):
+      position = 0
+      return
+
+
+
+
+
+
+
+
 
